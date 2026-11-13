@@ -1,6 +1,9 @@
 -- =====================================================================
 -- Tabla Anual 2027 — PARTE 2: acontecimientos, votos y reclamos
 --
+-- ⚠️ NO lo vuelvas a ejecutar en un proyecto que ya tiene datos.
+--    Las mejoras futuras van en archivos nuevos (03-..., 04-...).
+--
 -- Ejecuta este archivo UNA vez (Supabase → SQL Editor → New query → Run).
 -- Si tu proyecto tenía la versión anterior (reclamos con votación),
 -- la sección 0 la borra. Los usuarios NO se tocan.

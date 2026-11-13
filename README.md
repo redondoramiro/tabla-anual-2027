@@ -101,9 +101,21 @@ En el plan gratis de GitHub el repositorio debe ser público.
 
 ---
 
+## Copias de seguridad
+
+Cada día se guarda una copia completa de la base de datos en el repositorio **privado** `redondoramiro/tabla-anual-2027-backups`.
+Su README explica cómo restaurarla.
+
 ## Hacer cambios
 
 No hay nada que compilar: editas un archivo, haces commit y push, y GitHub Pages lo publica en 1 o 2 minutos.
+
+**Para cambios en la base de datos:**
+1. Haz un backup manual: en el repositorio de backups, **Actions → Run workflow**.
+2. Ejecuta la migración nueva (`03-...sql`, `04-...sql`…).
+3. Publica la web.
+
+**Nunca vuelvas a ejecutar `01-base.sql` ni `02-app.sql`** en un proyecto que ya tiene datos: son solo para instalar desde cero.
 
 | Quiero cambiar… | Dónde |
 |---|---|

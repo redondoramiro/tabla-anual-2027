@@ -4,11 +4,11 @@
 // =====================================================================
 
 // URL del proyecto, por ejemplo 'https://abcdefghijk.supabase.co'
-export const SUPABASE_URL = 'https://TU-PROYECTO.supabase.co';
+export const SUPABASE_URL = 'https://ibbeycsmaasgcvwtimko.supabase.co';
 
 // Clave PÚBLICA ("publishable" o "anon"). Está pensada para ir en la web.
 // ¡NUNCA pongas aquí la clave "secret" ni la "service_role"!
-export const SUPABASE_KEY = 'TU-CLAVE-PUBLICA';
+export const SUPABASE_KEY = 'sb_publishable_0OSlTOGOMiBZt-duhWNHow_t8PdvdCV';
 
 // Dominio inventado para convertir "usuario" en un email interno de Supabase.
 // No se envía ningún correo. Debe ser igual al de supabase/functions/admin-users/index.ts

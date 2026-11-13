@@ -10,14 +10,17 @@ const app = document.getElementById('app');
 const EDIT_MS = EDIT_MINUTES * 60 * 1000;
 
 const state = {
-  me: null,           // perfil del usuario conectado
-  events: [],         // acontecimientos activos
-  claims: [],         // reclamos cargados
-  activeUsers: 0,     // usuarios activos (para calcular votantes)
-  filter: 'pendiente' // filtro de la pantalla Reclamos
+  me: null,            // perfil del usuario conectado
+  profiles: [],        // todos los usuarios
+  categories: [],      // las 4 categorías
+  happenings: [],      // acontecimientos cargados
+  complaints: [],      // reclamos generales
+  histFilter: 'todos', // filtro del historial
 };
 
-const STATUS_LABEL = { pendiente: 'Pendiente', aceptado: 'Aceptado', rechazado: 'Rechazado' };
+const STATUS_LABEL = {
+  abierto: 'En votación', aceptado: 'Aceptado', rechazado: 'Rechazado', resuelto: 'Resuelto',
+};
 
 
 // ---------------------------------------------------------------------
@@ -32,10 +35,14 @@ const fmtDate = (iso) => new Date(iso).toLocaleString('es', {
   day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
 });
 
-const mmss = (ms) => {
+// Tiempo restante: "5h 20m" si queda más de una hora, si no "12:34"
+function fmtLeft(ms) {
   const s = Math.max(0, Math.ceil(ms / 1000));
+  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-};
+}
+
+const pts = (n) => `${n > 0 ? '+' : ''}${n}`;
 
 function toast(msg, isError = false) {
   const t = document.createElement('div');
@@ -51,10 +58,11 @@ async function run(fn) {
 }
 
 const view = () => document.getElementById('view');
+const currentTab = () => location.hash.slice(1) || 'tabla';
 
 
 // ---------------------------------------------------------------------
-// Formulario en ventana emergente (se usa para todo: reclamos, usuarios…)
+// Formulario en ventana emergente (se usa para todo)
 //   fields: [{ name, label, type: 'text'|'password'|'number'|'select'|'textarea',
 //              value, options: [{value,label}], required, attrs }]
 // ---------------------------------------------------------------------
@@ -68,7 +76,7 @@ function fieldHtml(f) {
     return `<label>${label}<select name="${f.name}" ${req}>${opts}</select></label>`;
   }
   if (f.type === 'textarea') {
-    return `<label>${label}<textarea name="${f.name}" rows="3" maxlength="500" ${req}>${esc(f.value)}</textarea></label>`;
+    return `<label>${label}<textarea name="${f.name}" rows="4" maxlength="1000" ${req}>${esc(f.value)}</textarea></label>`;
   }
   return `<label>${label}<input name="${f.name}" type="${f.type || 'text'}" value="${esc(f.value)}" ${req} ${f.attrs || ''}></label>`;
 }
@@ -162,9 +170,15 @@ function renderLogin(msg = '') {
   };
 }
 
+const TABS = {
+  tabla:     { icon: '🏆', label: 'Tabla',     show: showTabla },
+  historial: { icon: '📜', label: 'Historial', show: showHistorial },
+  reclamos:  { icon: '📣', label: 'Reclamos',  show: showReclamos },
+  admin:     { icon: '⚙️', label: 'Admin',     show: showAdmin, adminOnly: true },
+};
+
 function renderShell() {
-  const tabs = [['tabla', '🏆', 'Tabla'], ['reclamos', '📣', 'Reclamos']];
-  if (state.me.is_admin) tabs.push(['admin', '⚙️', 'Admin']);
+  const tabs = Object.entries(TABS).filter(([, t]) => !t.adminOnly || state.me.is_admin);
 
   app.innerHTML = `
     <header class="topbar">
@@ -174,8 +188,8 @@ function renderShell() {
     </header>
     <main id="view"></main>
     <nav class="tabs">
-      ${tabs.map(([id, icon, label]) =>
-        `<a href="#${id}" data-tab="${id}"><span class="icon">${icon}</span>${label}</a>`).join('')}
+      ${tabs.map(([id, t]) =>
+        `<a href="#${id}" data-tab="${id}"><span class="icon">${t.icon}</span>${t.label}</a>`).join('')}
     </nav>`;
 
   document.getElementById('logout').onclick = async () => {
@@ -187,24 +201,18 @@ function renderShell() {
 
 async function route() {
   if (!state.me) return;
-  let tab = location.hash.slice(1) || 'tabla';
-  if (tab === 'admin' && !state.me.is_admin) tab = 'tabla';
-  if (!['tabla', 'reclamos', 'admin'].includes(tab)) tab = 'tabla';
+  let tab = currentTab();
+  if (!TABS[tab] || (TABS[tab].adminOnly && !state.me.is_admin)) tab = 'tabla';
 
   document.querySelectorAll('.tabs a').forEach((a) =>
     a.classList.toggle('active', a.dataset.tab === tab));
 
   const el = view();
   if (!el.innerHTML) el.innerHTML = '<p class="muted center">Cargando…</p>';
-
-  await run(async () => {
-    if (tab === 'tabla') await showTabla(el);
-    if (tab === 'reclamos') await showReclamos(el);
-    if (tab === 'admin') await showAdmin(el);
-  });
+  await run(() => TABS[tab].show(el));
 }
 
-window.addEventListener('hashchange', () => { view() && (view().innerHTML = ''); route(); });
+window.addEventListener('hashchange', () => { if (view()) view().innerHTML = ''; route(); });
 
 // Al volver a la app (por ejemplo, desde otra app del móvil) se refrescan los datos
 document.addEventListener('visibilitychange', () => {
@@ -217,6 +225,7 @@ document.addEventListener('visibilitychange', () => {
 // ---------------------------------------------------------------------
 
 async function showTabla(el) {
+  await api.closeDue();
   const rows = await api.getLeaderboard();
   const medals = ['🥇', '🥈', '🥉'];
 
@@ -227,7 +236,7 @@ async function showTabla(el) {
         <li class="card rank-row ${r.id === state.me.id ? 'mine' : ''}">
           <span class="pos">${medals[i] ?? i + 1}</span>
           <span class="name">${esc(r.display_name)}
-            <small>${r.accepted} aceptados · ${r.pending} pendientes</small></span>
+            <small>${r.accepted} aceptados · ${r.pending} en votación</small></span>
           <span class="pts">${r.points}<small>pts</small></span>
         </li>`).join('')}
     </ol>`;
@@ -235,164 +244,296 @@ async function showTabla(el) {
 
 
 // ---------------------------------------------------------------------
-// Pantalla: Reclamos
+// Pantalla: Historial de acontecimientos
+// ---------------------------------------------------------------------
+
+async function showHistorial(el) {
+  await api.closeDue();
+  const [profiles, categories, happenings] = await Promise.all([
+    api.getProfiles(), api.getCategories(), api.getHappenings(),
+  ]);
+  state.profiles = profiles;
+  state.categories = categories;
+  state.happenings = happenings;
+  drawHistorial(el);
+}
+
+function drawHistorial(el) {
+  const filters = [['todos', 'Todos'], ['abierto', 'En votación'], ['aceptado', 'Aceptados'],
+                   ['rechazado', 'Rechazados'], ['para-mi', 'Para mí']];
+  const f = state.histFilter;
+  const list = state.happenings.filter((h) =>
+    f === 'todos' || (f === 'para-mi' ? h.to_user === state.me.id : h.status === f));
+
+  el.innerHTML = `
+    <div class="view-head">
+      <h2>Historial</h2>
+      <button class="btn primary" data-action="new">+ Nuevo</button>
+    </div>
+    <div class="filters">
+      ${filters.map(([k, l]) =>
+        `<button class="chip ${f === k ? 'active' : ''}" data-filter="${k}">${l}</button>`).join('')}
+    </div>
+    ${list.length ? list.map(happeningCard).join('') : '<p class="muted center">No hay acontecimientos aquí.</p>'}`;
+
+  el.onclick = (e) => {
+    const chip = e.target.closest('[data-filter]');
+    if (chip) { state.histFilter = chip.dataset.filter; drawHistorial(el); return; }
+
+    const b = e.target.closest('[data-action]');
+    if (!b) return;
+    const h = state.happenings.find((x) => x.id === Number(b.dataset.id));
+    const reload = () => showHistorial(el);
+
+    switch (b.dataset.action) {
+      case 'new': happeningForm(); break;
+      case 'edit': happeningForm(h); break;
+      case 'defense': defenseForm(h); break;
+      case 'delete':
+        if (confirm('¿Borrar este acontecimiento?')) {
+          run(async () => { await api.deleteHappening(h.id); toast('Acontecimiento borrado'); await reload(); });
+        }
+        break;
+      case 'like':
+      case 'dislike': {
+        const value = b.dataset.action === 'like';
+        const mine = h.votes.find((v) => v.voter_id === state.me.id);
+        b.disabled = true;
+        run(async () => {
+          // Tocar otra vez el mismo voto lo quita
+          if (mine && mine.value === value) await api.removeVote(h.id, state.me.id);
+          else await api.vote(h.id, state.me.id, value);
+          await reload();
+        });
+        break;
+      }
+      case 'approve':
+      case 'reject': {
+        const accept = b.dataset.action === 'approve';
+        if (confirm(`¿${accept ? 'Aprobar' : 'Rechazar'} y cerrar la votación ahora?`)) {
+          run(async () => { await api.adminCloseHappening(h.id, accept); toast('Votación cerrada'); await reload(); });
+        }
+        break;
+      }
+    }
+  };
+}
+
+function happeningCard(h) {
+  const now = Date.now();
+  const editUntil = new Date(h.created_at).getTime() + EDIT_MS;
+  const closes = new Date(h.closes_at).getTime();
+  const open = h.status === 'abierto' && now < closes;
+  const isSender = h.from_user === state.me.id;
+  const isRecipient = h.to_user === state.me.id;
+  const canEdit = open && isSender && now < editUntil;
+
+  const likes = h.votes.filter((v) => v.value);
+  const dislikes = h.votes.filter((v) => !v.value);
+  const names = (vs) => vs.map((v) => esc(v.voter?.display_name)).join(', ');
+  const myVote = h.votes.find((v) => v.voter_id === state.me.id);
+
+  // Línea de estado / tiempo
+  let timeInfo;
+  if (open) timeInfo = `Cierra en <b data-closes="${closes}">${fmtLeft(closes - now)}</b>`;
+  else if (h.status === 'abierto') timeInfo = 'Cerrando…';
+  else timeInfo = `Cerrado ${fmtDate(h.closed_at)}${h.closed_by ? ` por ${esc(h.closer?.display_name ?? 'admin')}` : ''}`;
+
+  // Botones
+  let actions = '';
+  if (open) {
+    if (isRecipient) {
+      actions += `<button class="btn small" data-action="defense" data-id="${h.id}">${h.defense ? 'Editar descargo' : 'Escribir descargo'}</button>`;
+    } else {
+      actions += `
+        <button class="btn vote-yes ${myVote?.value === true ? 'chosen' : ''}" data-action="like" data-id="${h.id}">👍 Like</button>
+        <button class="btn vote-no ${myVote?.value === false ? 'chosen' : ''}" data-action="dislike" data-id="${h.id}">👎 No like</button>`;
+    }
+    if (canEdit) {
+      actions += `
+        <span class="muted note">Puedes editar durante <b data-until="${editUntil}">${fmtLeft(editUntil - now)}</b></span>
+        <button class="btn small" data-action="edit" data-id="${h.id}">Editar</button>
+        <button class="btn small danger" data-action="delete" data-id="${h.id}">Borrar</button>`;
+    }
+    if (state.me.is_admin) {
+      actions += `
+        <span class="admin-row">
+          <button class="btn small ok" data-action="approve" data-id="${h.id}">✓ Aprobar ya</button>
+          <button class="btn small danger" data-action="reject" data-id="${h.id}">✗ Rechazar ya</button>
+        </span>`;
+    }
+  }
+  if (state.me.is_admin && !canEdit) {
+    actions += `<button class="btn small danger ghost" data-action="delete" data-id="${h.id}">Borrar</button>`;
+  }
+
+  return `
+    <article class="card claim ${isRecipient ? 'to-me' : ''}">
+      <div class="claim-head">
+        <span class="from-to"><small>De</small> <b>${esc(h.sender?.display_name)}</b>
+          <small>para</small> <b>${esc(h.recipient?.display_name)}</b></span>
+        <span class="badge ${h.status}">${STATUS_LABEL[h.status]}</span>
+      </div>
+      <div class="claim-event">${esc(h.category?.name)} <span class="pts-tag">${pts(h.points)}</span></div>
+      <p class="claim-desc">${esc(h.comment)}</p>
+      ${h.defense ? `
+        <div class="defense">
+          <small>Descargo de ${esc(h.recipient?.display_name)}</small>
+          <p>${esc(h.defense)}</p>
+        </div>` : ''}
+      <div class="claim-meta">
+        <span>${fmtDate(h.created_at)}</span>
+        <span>${timeInfo}</span>
+      </div>
+      <div class="votes-line">
+        <span>👍 ${likes.length}${likes.length ? ` <small>${names(likes)}</small>` : ''}</span>
+        <span>👎 ${dislikes.length}${dislikes.length ? ` <small>${names(dislikes)}</small>` : ''}</span>
+      </div>
+      ${actions ? `<div class="claim-actions">${actions}</div>` : ''}
+    </article>`;
+}
+
+function happeningForm(h) {
+  const others = state.profiles.filter((p) => p.active && p.id !== state.me.id);
+  if (!others.length) return toast('Todavía no hay otros usuarios', true);
+
+  formModal({
+    title: h ? 'Editar acontecimiento' : 'Nuevo acontecimiento',
+    submitLabel: h ? 'Guardar' : 'Cargar acontecimiento',
+    fields: [
+      {
+        name: 'to_user', label: 'Para', type: 'select', required: true, value: h?.to_user,
+        options: others.map((p) => ({ value: p.id, label: p.display_name })),
+      },
+      {
+        name: 'category_id', label: 'Categoría', type: 'select', required: true, value: h?.category_id,
+        options: state.categories.map((c) => ({ value: c.id, label: `${c.name} (${pts(c.points)})` })),
+      },
+      { name: 'comment', label: 'Comentarios: ¿qué pasó?', type: 'textarea', required: true, value: h?.comment ?? '' },
+    ],
+    onSubmit: async (v) => {
+      const data = { to_user: v.to_user, category_id: v.category_id, comment: v.comment.trim() };
+      if (!data.comment) throw new Error('Escribe un comentario');
+      if (h) await api.updateHappening(h.id, data);
+      else await api.createHappening(data);
+      toast(h ? 'Acontecimiento actualizado' : 'Acontecimiento cargado');
+      await showHistorial(view());
+    },
+  });
+}
+
+function defenseForm(h) {
+  formModal({
+    title: 'Tu descargo',
+    submitLabel: 'Guardar descargo',
+    fields: [{ name: 'defense', label: 'Cuenta tu versión (los demás pueden cambiar su voto)', type: 'textarea', value: h.defense ?? '' }],
+    onSubmit: async (v) => {
+      await api.saveDefense(h.id, v.defense.trim());
+      toast('Descargo guardado');
+      await showHistorial(view());
+    },
+  });
+}
+
+// Cuentas regresivas (cada segundo)
+let refreshing = false;
+setInterval(() => {
+  let expired = false;
+  document.querySelectorAll('[data-until], [data-closes]').forEach((b) => {
+    const left = Number(b.dataset.until || b.dataset.closes) - Date.now();
+    if (left <= 0) expired = true;
+    else b.textContent = fmtLeft(left);
+  });
+  // Si terminó un plazo, se recarga el historial para mostrar el estado correcto
+  if (expired && !refreshing && currentTab() === 'historial' && !document.querySelector('.modal')) {
+    refreshing = true;
+    run(() => showHistorial(view())).finally(() => { refreshing = false; });
+  }
+}, 1000);
+
+
+// ---------------------------------------------------------------------
+// Pantalla: Reclamos generales sobre el sistema
 // ---------------------------------------------------------------------
 
 async function showReclamos(el) {
-  const [events, claims, profiles] = await Promise.all([
-    api.getEvents(), api.getClaims(), api.getProfiles(),
-  ]);
-  state.events = events;
-  state.claims = claims;
-  state.activeUsers = profiles.filter((p) => p.active).length;
-  drawReclamos(el);
-}
-
-function drawReclamos(el) {
-  const filters = [['pendiente', 'Pendientes'], ['aceptado', 'Aceptados'],
-                   ['rechazado', 'Rechazados'], ['todos', 'Todos']];
-  const list = state.claims.filter((c) => state.filter === 'todos' || c.status === state.filter);
+  state.complaints = await api.getComplaints();
+  const list = state.complaints;
 
   el.innerHTML = `
     <div class="view-head">
       <h2>Reclamos</h2>
       <button class="btn primary" data-action="new">+ Nuevo</button>
     </div>
-    <div class="filters">
-      ${filters.map(([k, l]) =>
-        `<button class="chip ${state.filter === k ? 'active' : ''}" data-filter="${k}">${l}</button>`).join('')}
-    </div>
-    ${list.length ? list.map(claimCard).join('') : '<p class="muted center">No hay reclamos aquí.</p>'}`;
+    <p class="muted intro">Quejas, ideas o problemas con la app. El admin los responde aquí.</p>
+    ${list.length ? list.map((c) => `
+      <article class="card claim">
+        <div class="claim-head">
+          <b>${esc(c.author?.display_name)}</b>
+          <span class="badge ${c.status}">${STATUS_LABEL[c.status]}</span>
+        </div>
+        <p class="claim-desc body">${esc(c.body)}</p>
+        ${c.response ? `<div class="defense"><small>Respuesta del admin</small><p>${esc(c.response)}</p></div>` : ''}
+        <div class="claim-meta"><span>${fmtDate(c.created_at)}</span>
+          ${c.resolved_at ? `<span>Resuelto ${fmtDate(c.resolved_at)}</span>` : ''}</div>
+        ${(state.me.is_admin || (c.user_id === state.me.id && c.status === 'abierto')) ? `
+          <div class="claim-actions">
+            ${state.me.is_admin ? `<button class="btn small" data-action="answer" data-id="${c.id}">Responder</button>` : ''}
+            <button class="btn small danger ghost" data-action="delete" data-id="${c.id}">Borrar</button>
+          </div>` : ''}
+      </article>`).join('') : '<p class="muted center">No hay reclamos.</p>'}`;
+
+  const reload = () => showReclamos(el);
 
   el.onclick = (e) => {
-    const f = e.target.closest('[data-filter]');
-    if (f) { state.filter = f.dataset.filter; drawReclamos(el); return; }
-
     const b = e.target.closest('[data-action]');
     if (!b) return;
-    const claim = state.claims.find((c) => c.id === Number(b.dataset.id));
+    const c = state.complaints.find((x) => x.id === Number(b.dataset.id));
 
     switch (b.dataset.action) {
-      case 'new': claimForm(); break;
-      case 'edit': claimForm(claim); break;
+      case 'new':
+        formModal({
+          title: 'Nuevo reclamo', submitLabel: 'Enviar',
+          fields: [{ name: 'body', label: '¿Qué quieres reclamar o proponer?', type: 'textarea', required: true }],
+          onSubmit: async (v) => {
+            if (!v.body.trim()) throw new Error('Escribe algo');
+            await api.createComplaint(v.body.trim());
+            toast('Reclamo enviado');
+            await reload();
+          },
+        });
+        break;
+      case 'answer':
+        formModal({
+          title: 'Responder reclamo',
+          fields: [
+            { name: 'status', label: 'Estado', type: 'select', value: c.status,
+              options: [{ value: 'abierto', label: 'Abierto' }, { value: 'resuelto', label: 'Resuelto' }] },
+            { name: 'response', label: 'Respuesta', type: 'textarea', value: c.response ?? '' },
+          ],
+          onSubmit: async (v) => {
+            await api.adminAnswerComplaint(c.id, { status: v.status, response: v.response.trim() });
+            toast('Reclamo actualizado');
+            await reload();
+          },
+        });
+        break;
       case 'delete':
         if (confirm('¿Borrar este reclamo?')) {
-          run(async () => { await api.deleteClaim(claim.id); toast('Reclamo borrado'); await showReclamos(el); });
+          run(async () => { await api.deleteComplaint(c.id); toast('Reclamo borrado'); await reload(); });
         }
-        break;
-      case 'yes':
-      case 'no':
-        b.disabled = true;
-        run(async () => {
-          await api.vote(claim.id, b.dataset.action === 'yes');
-          toast('Voto registrado');
-          await showReclamos(el);
-        });
         break;
     }
   };
 }
 
-function claimCard(c) {
-  const now = Date.now();
-  const until = new Date(c.created_at).getTime() + EDIT_MS;
-  const inWindow = now < until;
-  const mine = c.user_id === state.me.id;
-  const yes = c.votes.filter((v) => v.value).length;
-  const no = c.votes.length - yes;
-  const myVote = c.votes.find((v) => v.voter_id === state.me.id);
-  const voters = Math.max(state.activeUsers - 1, 0);
-  const timer = `<b data-until="${until}">${mmss(until - now)}</b>`;
-
-  let actions = '';
-  if (c.status === 'pendiente') {
-    if (mine && inWindow) {
-      actions = `<span class="muted">Puedes editar durante ${timer}</span>
-        <button class="btn small" data-action="edit" data-id="${c.id}">Editar</button>
-        <button class="btn small danger" data-action="delete" data-id="${c.id}">Borrar</button>`;
-    } else if (mine) {
-      actions = '<span class="muted">Esperando los votos del resto</span>';
-    } else if (inWindow) {
-      actions = `<span class="muted">La votación abre en ${timer}</span>`;
-    } else if (myVote) {
-      actions = `<span class="muted">Votaste ${myVote.value ? 'Sí 👍' : 'No 👎'}</span>`;
-    } else {
-      actions = `
-        <button class="btn vote-yes" data-action="yes" data-id="${c.id}">👍 Sí</button>
-        <button class="btn vote-no" data-action="no" data-id="${c.id}">👎 No</button>`;
-    }
-  }
-  // El admin puede borrar cualquier reclamo (moderación)
-  if (state.me.is_admin && !(mine && inWindow && c.status === 'pendiente')) {
-    actions += `<button class="btn small danger ghost" data-action="delete" data-id="${c.id}">Borrar</button>`;
-  }
-
-  return `
-    <article class="card claim">
-      <div class="claim-head">
-        <b>${esc(c.author?.display_name)}</b>
-        <span class="badge ${c.status}">${STATUS_LABEL[c.status]}</span>
-      </div>
-      <div class="claim-event">${esc(c.event?.name)} <span class="pts-tag">${c.points > 0 ? '+' : ''}${c.points}</span></div>
-      ${c.description ? `<p class="claim-desc">${esc(c.description)}</p>` : ''}
-      <div class="claim-meta">
-        <span>${fmtDate(c.created_at)}</span>
-        <span>👍 ${yes} · 👎 ${no} <small>(${voters} votantes)</small></span>
-      </div>
-      ${actions ? `<div class="claim-actions">${actions}</div>` : ''}
-    </article>`;
-}
-
-function claimForm(claim) {
-  const events = [...state.events];
-  // Si el acontecimiento del reclamo ya no está activo, igual se muestra
-  if (claim && !events.some((e) => e.id === claim.event_id)) {
-    events.push({ id: claim.event_id, name: claim.event?.name ?? '?', points: claim.points });
-  }
-  if (!events.length) return toast('El admin todavía no cargó acontecimientos', true);
-
-  formModal({
-    title: claim ? 'Editar reclamo' : 'Nuevo reclamo',
-    submitLabel: claim ? 'Guardar' : 'Crear reclamo',
-    fields: [
-      {
-        name: 'event_id', label: 'Acontecimiento', type: 'select', required: true,
-        value: claim?.event_id,
-        options: events.map((e) => ({ value: e.id, label: `${e.name} (${e.points > 0 ? '+' : ''}${e.points})` })),
-      },
-      { name: 'description', label: 'Detalle (opcional)', type: 'textarea', value: claim?.description ?? '' },
-    ],
-    onSubmit: async ({ event_id, description }) => {
-      if (claim) await api.updateClaim(claim.id, Number(event_id), description.trim());
-      else await api.createClaim(Number(event_id), description.trim());
-      toast(claim ? 'Reclamo actualizado' : 'Reclamo creado');
-      state.filter = 'pendiente';
-      await showReclamos(view());
-    },
-  });
-}
-
-// Cuenta regresiva de los reclamos (cada segundo)
-setInterval(() => {
-  let expired = false;
-  document.querySelectorAll('[data-until]').forEach((b) => {
-    const left = Number(b.dataset.until) - Date.now();
-    if (left <= 0) expired = true;
-    else b.textContent = mmss(left);
-  });
-  // Al terminar un plazo, se redibuja para mostrar los botones correctos
-  if (expired && location.hash === '#reclamos' && !document.querySelector('.modal')) {
-    drawReclamos(view());
-  }
-}, 1000);
-
 
 // ---------------------------------------------------------------------
-// Pantalla: Admin (usuarios y acontecimientos)
+// Pantalla: Admin (usuarios y categorías)
 // ---------------------------------------------------------------------
 
 async function showAdmin(el) {
-  const [profiles, events] = await Promise.all([api.getProfiles(), api.getEvents(false)]);
+  const [profiles, categories] = await Promise.all([api.getProfiles(), api.getCategories()]);
 
   el.innerHTML = `
     <div class="view-head">
@@ -415,21 +556,15 @@ async function showAdmin(el) {
         </div>
       </div>`).join('')}
 
-    <div class="view-head">
-      <h2>Acontecimientos</h2>
-      <button class="btn primary" data-action="new-event">+ Nuevo</button>
-    </div>
-    ${events.map((ev) => `
-      <div class="card row-item ${ev.active ? '' : 'inactive'}">
-        <div class="row-info">
-          <b>${esc(ev.name)}</b> <span class="pts-tag">${ev.points > 0 ? '+' : ''}${ev.points}</span>
-          ${ev.active ? '' : '<span class="badge rechazado">inactivo</span>'}
-        </div>
+    <div class="view-head"><h2>Categorías</h2></div>
+    ${categories.map((c) => `
+      <div class="card row-item">
+        <div class="row-info"><b>${esc(c.name)}</b> <span class="pts-tag">${pts(c.points)}</span></div>
         <div class="row-actions">
-          <button class="btn small" data-action="edit-event" data-id="${ev.id}">Editar</button>
-          <button class="btn small" data-action="toggle-event" data-id="${ev.id}">${ev.active ? 'Desactivar' : 'Activar'}</button>
+          <button class="btn small" data-action="edit-category" data-id="${c.id}">Editar</button>
         </div>
-      </div>`).join('')}`;
+      </div>`).join('')}
+    <p class="muted intro">Cambiar el puntaje afecta solo a los acontecimientos nuevos.</p>`;
 
   const reload = () => showAdmin(el);
 
@@ -438,7 +573,7 @@ async function showAdmin(el) {
     if (!b) return;
     const id = b.dataset.id;
     const p = profiles.find((x) => x.id === id);
-    const ev = events.find((x) => String(x.id) === id);
+    const cat = categories.find((x) => x.id === id);
 
     switch (b.dataset.action) {
       case 'new-user':
@@ -496,24 +631,19 @@ async function showAdmin(el) {
         }
         break;
 
-      case 'new-event':
-      case 'edit-event':
+      case 'edit-category':
         formModal({
-          title: ev ? 'Editar acontecimiento' : 'Nuevo acontecimiento',
+          title: 'Editar categoría',
           fields: [
-            { name: 'name', label: 'Nombre', value: ev?.name ?? '', required: true },
-            { name: 'points', label: 'Puntaje', type: 'number', value: ev?.points ?? 5, required: true, attrs: 'step="1"' },
+            { name: 'name', label: 'Nombre', value: cat.name, required: true },
+            { name: 'points', label: 'Puntaje', type: 'number', value: cat.points, required: true, attrs: 'step="1"' },
           ],
           onSubmit: async (v) => {
-            await api.adminSaveEvent({ id: ev?.id, name: v.name.trim(), points: Number(v.points) });
-            toast('Acontecimiento guardado');
+            await api.adminSaveCategory(cat.id, { name: v.name.trim(), points: Number(v.points) });
+            toast('Categoría guardada');
             await reload();
           },
         });
-        break;
-
-      case 'toggle-event':
-        run(async () => { await api.adminSaveEvent({ id: ev.id, active: !ev.active }); await reload(); });
         break;
     }
   };

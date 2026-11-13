@@ -45,11 +45,21 @@ Aunque alguien modifique el JavaScript desde su navegador, no puede votar dos ve
 1. **Authentication → Users → Add user → Create new user**
    - Email: `ramiroredondo@tablaanual2027.app`. Es un email interno: no recibe correos, solo convierte el nombre de usuario en el formato que pide Supabase.
    - Password: la que elijas. **No uses tu número de documento**: es fácil de adivinar y es un dato personal.
-   - Marca **Auto Confirm User**.
-2. En **SQL Editor**, ejecuta:
+   - Si aparece la casilla **Auto Confirm User**, márcala. En versiones nuevas del panel no aparece; el paso siguiente confirma el usuario igualmente.
+2. En **SQL Editor**, ejecuta este bloque. Confirma el usuario, crea su perfil si falta, lo hace admin y muestra el resultado:
    ```sql
-   update profiles set is_admin = true where username = 'ramiroredondo';
+   update auth.users set email_confirmed_at = coalesce(email_confirmed_at, now())
+    where email = 'ramiroredondo@tablaanual2027.app';
+
+   insert into profiles (id, username, display_name, is_admin)
+   select id, 'ramiroredondo', 'Ramiro', true from auth.users
+    where email = 'ramiroredondo@tablaanual2027.app'
+   on conflict (id) do update set is_admin = true;
+
+   select u.email, u.email_confirmed_at, p.username, p.is_admin, p.active
+     from auth.users u left join profiles p on p.id = u.id;
    ```
+   Debe aparecer una fila con `is_admin = true` y `active = true`.
 
 ### 3. Publicar la función de administración
 
